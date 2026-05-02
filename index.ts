@@ -114,17 +114,12 @@ interface NpmOutdatedEntry {
 }
 
 function pickTopLevelEntry(
-  name: string,
   entries: NpmOutdatedEntry[],
 ): NpmOutdatedEntry | undefined {
-  // Prefer the top-level global install (npm marks it dependent="lib" or
-  // location ends with `node_modules/<name>` with no extra nesting).
-  const suffix = `/node_modules/${name}`;
-  const topLevel = entries.find(
-    (e) => e.dependent === "lib" || e.location?.endsWith(suffix),
-  );
-  if (topLevel) return topLevel;
-  return entries.find((e) => e.current && e.latest && e.current !== e.latest);
+  // Only the npm global root reports dependent="lib". Nested copies inside
+  // other globally-installed packages report dependent="<parent>" and are
+  // owned by the parent — we can't update them independently, so skip.
+  return entries.find((e) => e.dependent === "lib");
 }
 
 async function fetchOutdated(
@@ -144,7 +139,7 @@ async function fetchOutdated(
     >;
     const result: OutdatedPackage[] = [];
     for (const [name, raw] of Object.entries(obj)) {
-      const entry = Array.isArray(raw) ? pickTopLevelEntry(name, raw) : raw;
+      const entry = Array.isArray(raw) ? pickTopLevelEntry(raw) : raw;
       if (entry?.latest && entry.current && entry.latest !== entry.current) {
         result.push({ name, current: entry.current, latest: entry.latest });
       }
