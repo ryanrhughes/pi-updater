@@ -1,13 +1,13 @@
 {
   "name": "pi-updater",
-  "version": "0.3.0",
-  "description": "Codex-style auto-updater for pi. Checks for new versions on startup and prompts to install.",
+  "version": "0.4.0",
+  "description": "Auto-updater for pi and its installed extensions. Checks all configured npm packages on startup and (by default) silently updates and restarts.",
   "type": "module",
   "license": "MIT",
-  "author": "Toms clanker",
+  "author": "Toms clanker, Ryan Hughes",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tonze/pi-updater.git"
+    "url": "git+https://github.com/ryanrhughes/pi-updater.git"
   },
   "keywords": [
     "pi-package",

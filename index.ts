@@ -8,22 +8,36 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 
-const PACKAGE_NAME = "@mariozechner/pi-coding-agent";
-const REGISTRY_URL = `https://registry.npmjs.org/${PACKAGE_NAME}/latest`;
+const CORE_PACKAGE = "@mariozechner/pi-coding-agent";
+const SETTINGS_FILE = join(homedir(), ".pi", "agent", "settings.json");
 const CACHE_FILE = join(homedir(), ".pi", "agent", "update-cache.json");
 
 const ENV_SKIP_VERSION_CHECK = "PI_SKIP_VERSION_CHECK";
 const ENV_OFFLINE = "PI_OFFLINE";
+const ENV_AUTO_UPDATE = "PI_AUTO_UPDATE";
+
+interface OutdatedPackage {
+  name: string;
+  current: string;
+  latest: string;
+}
 
 interface VersionCache {
-  latestVersion: string;
-  dismissedVersion?: string;
+  outdated: OutdatedPackage[];
+  /** package name -> dismissed version */
+  dismissed: Record<string, string>;
   checkedAt?: string;
 }
 
 function readCache(): VersionCache | undefined {
   try {
-    return JSON.parse(readFileSync(CACHE_FILE, "utf-8"));
+    const raw = JSON.parse(readFileSync(CACHE_FILE, "utf-8"));
+    if (!Array.isArray(raw.outdated)) return undefined;
+    return {
+      outdated: raw.outdated as OutdatedPackage[],
+      dismissed: (raw.dismissed as Record<string, string>) || {},
+      checkedAt: raw.checkedAt as string | undefined,
+    };
   } catch {
     return undefined;
   }
@@ -34,23 +48,6 @@ function writeCache(cache: VersionCache) {
     mkdirSync(dirname(CACHE_FILE), { recursive: true });
     writeFileSync(CACHE_FILE, JSON.stringify(cache) + "\n");
   } catch {}
-}
-
-function parseVersion(v: string): [number, number, number] | undefined {
-  const parts = v.trim().split(".");
-  if (parts.length !== 3) return undefined;
-  const nums = parts.map(Number);
-  if (nums.some(isNaN)) return undefined;
-  return nums as [number, number, number];
-}
-
-function isNewer(latest: string, current: string): boolean {
-  const l = parseVersion(latest);
-  const c = parseVersion(current);
-  if (!l || !c) return false;
-  if (l[0] !== c[0]) return l[0] > c[0];
-  if (l[1] !== c[1]) return l[1] > c[1];
-  return l[2] > c[2];
 }
 
 function isEnvSet(name: string): boolean {
@@ -65,67 +62,88 @@ function isOffline(): boolean {
   return isEnvSet(ENV_OFFLINE);
 }
 
-function saveLatestToCache(latest: string) {
-  const prev = readCache();
-  writeCache({
-    latestVersion: latest,
-    dismissedVersion: prev?.dismissedVersion,
-    checkedAt: new Date().toISOString(),
-  });
+function autoUpdateEnabled(): boolean {
+  const v = process.env[ENV_AUTO_UPDATE];
+  if (v === undefined) return true;
+  return !["0", "false", "off", "no", ""].includes(v.toLowerCase());
 }
 
-async function fetchLatestVersion(): Promise<string | undefined> {
+function readConfiguredPackages(): string[] {
+  const set = new Set<string>([CORE_PACKAGE]);
   try {
-    const res = await fetch(REGISTRY_URL, {
-      signal: AbortSignal.timeout(10_000),
+    const s = JSON.parse(readFileSync(SETTINGS_FILE, "utf-8")) as {
+      packages?: string[];
+    };
+    for (const p of s.packages || []) {
+      const m = String(p).match(/^npm:(.+)$/);
+      if (m) set.add(m[1]);
+    }
+  } catch {}
+  return Array.from(set);
+}
+
+async function fetchOutdated(
+  pi: ExtensionAPI,
+  pkgs: string[],
+): Promise<OutdatedPackage[] | undefined> {
+  try {
+    // npm outdated exits 1 when packages are outdated, 0 when none. Both are fine.
+    const r = await pi.exec("npm", ["outdated", "-g", "--json", ...pkgs], {
+      timeout: 15_000,
     });
-    if (!res.ok) return undefined;
-    return ((await res.json()) as { version?: string }).version;
+    const out = (r.stdout || "").trim();
+    if (!out) return [];
+    const obj = JSON.parse(out) as Record<
+      string,
+      { current?: string; latest?: string }
+    >;
+    const result: OutdatedPackage[] = [];
+    for (const [name, v] of Object.entries(obj)) {
+      if (v.latest && v.current && v.latest !== v.current) {
+        result.push({ name, current: v.current, latest: v.latest });
+      }
+    }
+    return result;
   } catch {
     return undefined;
   }
 }
 
-/** Returns a cached upgrade if available and not dismissed. */
-function getCachedUpgradeVersion(): string | undefined {
-  const cache = readCache();
-  if (!cache) return undefined;
-  if (!isNewer(cache.latestVersion, VERSION)) return undefined;
-  if (cache.dismissedVersion === cache.latestVersion) return undefined;
-  return cache.latestVersion;
-}
-
-/** Fetch latest from npm and refresh cache. */
-async function refreshLatestVersionInCache(): Promise<string | undefined> {
-  const latest = await fetchLatestVersion();
-  if (!latest) return undefined;
-  saveLatestToCache(latest);
-  return latest;
-}
-
-function dismissVersion(version: string) {
-  const cache = readCache();
+function saveOutdatedToCache(outdated: OutdatedPackage[]) {
+  const prev = readCache();
   writeCache({
-    latestVersion: cache?.latestVersion ?? version,
-    dismissedVersion: version,
-    checkedAt: cache?.checkedAt,
+    outdated,
+    dismissed: prev?.dismissed || {},
+    checkedAt: new Date().toISOString(),
   });
 }
 
-function getInstallCommand(version: string): { program: string; args: string[] } {
-  return {
-    program: "npm",
-    args: ["install", "-g", `${PACKAGE_NAME}@${version}`],
-  };
+function dismissPackage(name: string, version: string) {
+  const prev = readCache();
+  writeCache({
+    outdated: prev?.outdated || [],
+    dismissed: { ...(prev?.dismissed || {}), [name]: version },
+    checkedAt: prev?.checkedAt,
+  });
 }
 
-function fmtCmd(cmd: { program: string; args: string[] }): string {
-  return `${cmd.program} ${cmd.args.join(" ")}`;
+function getActionablePackages(outdated: OutdatedPackage[]): OutdatedPackage[] {
+  const cache = readCache();
+  const dismissed = cache?.dismissed || {};
+  return outdated.filter((p) => dismissed[p.name] !== p.latest);
+}
+
+function buildInstallArgs(pkgs: OutdatedPackage[]): string[] {
+  return ["install", "-g", ...pkgs.map((p) => `${p.name}@${p.latest}`)];
+}
+
+function summarize(pkgs: OutdatedPackage[]): string {
+  return pkgs.map((p) => `${p.name} ${p.current} → ${p.latest}`).join(", ");
 }
 
 export default function (pi: ExtensionAPI) {
-  let promptOpen = false;
-  const promptedVersions = new Set<string>();
+  let runActive = false;
+  let handledOnce = false;
   let liveCheckStarted = false;
 
   async function findPiBinary(): Promise<string> {
@@ -162,16 +180,17 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  async function doInstall(
+  async function runInstall(
     ctx: ExtensionContext,
-    latest: string,
-    cmd: { program: string; args: string[] },
-  ) {
-    const success = await ctx.ui.custom<boolean>((tui, theme, _kb, done) => {
-      const loader = new BorderedLoader(tui, theme, `Installing ${latest}...`);
+    pkgs: OutdatedPackage[],
+    title: string,
+  ): Promise<boolean> {
+    const args = buildInstallArgs(pkgs);
+    return ctx.ui.custom<boolean>((tui, theme, _kb, done) => {
+      const loader = new BorderedLoader(tui, theme, title);
       loader.onAbort = () => done(false);
 
-      pi.exec(cmd.program, cmd.args, { timeout: 120_000 })
+      pi.exec("npm", args, { timeout: 180_000 })
         .then((result) => {
           if (result.code !== 0) {
             ctx.ui.notify(
@@ -187,70 +206,95 @@ export default function (pi: ExtensionAPI) {
 
       return loader;
     });
+  }
 
-    if (!success) return;
+  async function performInstallAndRestart(
+    ctx: ExtensionContext,
+    pkgs: OutdatedPackage[],
+    silent: boolean,
+  ) {
+    if (silent) ctx.ui.notify(`Updating: ${summarize(pkgs)}`, "info");
+
+    const ok = await runInstall(
+      ctx,
+      pkgs,
+      `Updating ${pkgs.length} package${pkgs.length === 1 ? "" : "s"}...`,
+    );
+    if (!ok) return;
+
+    saveOutdatedToCache([]);
 
     if (!canAutoRestart(ctx)) {
       ctx.ui.notify(
-        `Updated to ${latest}! Please restart pi.\nTip: run \`pi -c\` to continue this session.`,
+        `Updated ${pkgs.length} package(s). Please restart pi.\nTip: run \`pi -c\` to continue this session.`,
         "info",
       );
       return;
     }
 
-    const restart = await ctx.ui.confirm(
-      `Updated to ${latest}!`,
-      "Restart now?",
-    );
+    if (silent) {
+      ctx.ui.notify("Restarting pi...", "info");
+    } else {
+      const restart = await ctx.ui.confirm(
+        `Updated ${pkgs.length} package(s)!`,
+        "Restart now?",
+      );
+      if (!restart) return;
+    }
 
-    if (!restart) return;
-
-    const ok = await restartPi(ctx);
-    if (ok) {
+    const restarted = await restartPi(ctx);
+    if (restarted) {
       ctx.shutdown();
       return;
     }
-
     ctx.ui.notify(
-      `Updated to ${latest}! Auto-restart failed. Please restart pi manually.\nTip: run \`pi -c\` to continue this session.`,
+      `Updated. Auto-restart failed. Please restart pi manually.\nTip: run \`pi -c\` to continue this session.`,
       "error",
     );
   }
 
-  async function showUpdatePrompt(ctx: ExtensionContext, latest: string) {
-    const cmd = getInstallCommand(latest);
-    const choice = await ctx.ui.select(`Update ${VERSION} → ${latest}`, [
-      `Update now (${fmtCmd(cmd)})`,
+  async function showInteractivePrompt(
+    ctx: ExtensionContext,
+    pkgs: OutdatedPackage[],
+  ) {
+    if (!ctx.hasUI) return;
+    const updateLabel = `Update all (${pkgs.length}): ${summarize(pkgs)}`;
+    const choice = await ctx.ui.select("Updates available", [
+      updateLabel,
       "Skip",
-      "Skip this version",
+      "Skip these versions",
     ]);
-
     if (!choice || choice === "Skip") return;
-    if (choice === "Skip this version") {
-      dismissVersion(latest);
+    if (choice === "Skip these versions") {
+      for (const p of pkgs) dismissPackage(p.name, p.latest);
       return;
     }
-    await doInstall(ctx, latest, cmd);
+    await performInstallAndRestart(ctx, pkgs, false);
   }
 
-  function canAutoPromptVersion(latest: string): boolean {
-    if (!isNewer(latest, VERSION)) return false;
-    if (promptedVersions.has(latest)) return false;
-    if (readCache()?.dismissedVersion === latest) return false;
-    return true;
-  }
-
-  async function maybeShowAutoPrompt(ctx: ExtensionContext, latest: string) {
+  async function maybeHandleOutdated(
+    ctx: ExtensionContext,
+    outdated: OutdatedPackage[],
+    source: "cache" | "live",
+  ) {
     if (!ctx.hasUI) return;
-    if (promptOpen) return;
-    if (!canAutoPromptVersion(latest)) return;
+    if (runActive || handledOnce) return;
 
-    promptOpen = true;
-    promptedVersions.add(latest);
+    const actionable = getActionablePackages(outdated);
+    if (actionable.length === 0) return;
+
+    runActive = true;
+    handledOnce = true;
     try {
-      await showUpdatePrompt(ctx, latest);
+      if (autoUpdateEnabled()) {
+        // Only silent-restart from live check if user is idle.
+        if (source === "live" && !ctx.isIdle()) return;
+        await performInstallAndRestart(ctx, actionable, true);
+      } else {
+        await showInteractivePrompt(ctx, actionable);
+      }
     } finally {
-      promptOpen = false;
+      runActive = false;
     }
   }
 
@@ -258,16 +302,18 @@ export default function (pi: ExtensionAPI) {
     if (!ctx.hasUI) return;
     if (shouldSkipAutoChecks()) return;
 
-    const cached = getCachedUpgradeVersion();
-    if (cached) void maybeShowAutoPrompt(ctx, cached);
+    const cached = readCache()?.outdated || [];
+    if (cached.length > 0) void maybeHandleOutdated(ctx, cached, "cache");
 
     if (liveCheckStarted) return;
     liveCheckStarted = true;
 
-    void refreshLatestVersionInCache()
-      .then((latest) => {
-        if (!latest) return;
-        void maybeShowAutoPrompt(ctx, latest);
+    const pkgs = readConfiguredPackages();
+    void fetchOutdated(pi, pkgs)
+      .then((outdated) => {
+        if (!outdated) return;
+        saveOutdatedToCache(outdated);
+        void maybeHandleOutdated(ctx, outdated, "live");
       })
       .catch(() => {});
   }
@@ -281,37 +327,12 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("update", {
-    description: "Check for pi updates and install",
+    description: "Check for pi and extension updates",
     handler: async (rawArgs, ctx) => {
-      // /update --test — simulate the full UI flow without a real install
-      if (rawArgs?.trim() === "--test") {
-        const fakeLatest = "99.0.0";
-        const cmd = getInstallCommand(fakeLatest);
-        const choice = await ctx.ui.select(`Update ${VERSION} → ${fakeLatest}`, [
-          `Update now (${fmtCmd(cmd)})`,
-          "Skip",
-          "Skip this version",
-        ]);
-        if (!choice || choice === "Skip" || choice === "Skip this version") return;
+      const args = (rawArgs || "").trim();
 
-        await ctx.ui.custom<void>((tui, theme, _kb, done) => {
-          const loader = new BorderedLoader(tui, theme, `Installing ${fakeLatest}...`);
-          loader.onAbort = () => done();
-          setTimeout(() => done(), 1500);
-          return loader;
-        });
-
-        if (!canAutoRestart(ctx)) {
-          ctx.ui.notify(`Updated to ${fakeLatest}! Please restart pi.`, "info");
-          return;
-        }
-
-        const restart = await ctx.ui.confirm(`Updated to ${fakeLatest}!`, "Restart now?");
-        if (!restart) return;
-
-        const ok = await restartPi(ctx);
-        if (ok) { ctx.shutdown(); return; }
-        ctx.ui.notify("Test restart failed.", "error");
+      if (args === "--test") {
+        await runTestFlow(ctx);
         return;
       }
 
@@ -323,7 +344,8 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      const latest = await ctx.ui.custom<string | null>(
+      const pkgs = readConfiguredPackages();
+      const outdated = await ctx.ui.custom<OutdatedPackage[] | null>(
         (tui, theme, _kb, done) => {
           const loader = new BorderedLoader(
             tui,
@@ -331,27 +353,58 @@ export default function (pi: ExtensionAPI) {
             "Checking for updates...",
           );
           loader.onAbort = () => done(null);
-          fetchLatestVersion()
+          fetchOutdated(pi, pkgs)
             .then((v) => done(v ?? null))
             .catch(() => done(null));
           return loader;
         },
       );
 
-      if (!latest) {
+      if (outdated === null) {
         ctx.ui.notify("Could not reach npm registry.", "error");
         return;
       }
 
-      saveLatestToCache(latest);
+      saveOutdatedToCache(outdated);
 
-      if (!isNewer(latest, VERSION)) {
-        ctx.ui.notify(`Already on latest version (${VERSION}).`, "info");
+      if (outdated.length === 0) {
+        ctx.ui.notify(`All ${pkgs.length} pi packages are up to date.`, "info");
         return;
       }
 
-      promptedVersions.add(latest);
-      await showUpdatePrompt(ctx, latest);
+      handledOnce = true;
+      await showInteractivePrompt(ctx, outdated);
     },
   });
+
+  async function runTestFlow(ctx: ExtensionContext) {
+    const fakePkgs: OutdatedPackage[] = [
+      { name: CORE_PACKAGE, current: VERSION, latest: "99.0.0" },
+      { name: "pi-fake-extension", current: "0.1.0", latest: "0.2.0" },
+    ];
+    const choice = await ctx.ui.select("Updates available (test)", [
+      `Update all (${fakePkgs.length}): ${summarize(fakePkgs)}`,
+      "Skip",
+      "Skip these versions",
+    ]);
+    if (!choice || choice === "Skip" || choice === "Skip these versions") return;
+
+    await ctx.ui.custom<void>((tui, theme, _kb, done) => {
+      const loader = new BorderedLoader(tui, theme, "Updating 2 packages...");
+      loader.onAbort = () => done();
+      setTimeout(() => done(), 1500);
+      return loader;
+    });
+
+    if (!canAutoRestart(ctx)) {
+      ctx.ui.notify("Updated! Please restart pi.", "info");
+      return;
+    }
+
+    const restart = await ctx.ui.confirm("Updated!", "Restart now?");
+    if (!restart) return;
+    const ok = await restartPi(ctx);
+    if (ok) ctx.shutdown();
+    else ctx.ui.notify("Test restart failed.", "error");
+  }
 }

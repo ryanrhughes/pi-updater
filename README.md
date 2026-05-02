@@ -1,35 +1,31 @@
 # pi-updater
 
-A lightweight, Codex-style auto-updater for pi with fast, cache-first startup checks.
+Auto-updater for pi **and** its installed extensions. By default, silently updates and restarts on startup when newer versions are available — no prompts, no manual steps.
 
-- npm: https://www.npmjs.com/package/pi-updater
-- repo: https://github.com/tonze/pi-updater
+- repo: https://github.com/ryanrhughes/pi-updater
+- forked from: https://github.com/tonze/pi-updater
 
 > **Note:** Automatic installation currently supports npm-based pi installs only.
 
-<img width="800" height="482" alt="Screenshot 2026-02-28 at 09 01 37" src="https://github.com/user-attachments/assets/89df2dad-8d91-464b-b3cb-dfd15bce1c06" />
-
 ## What it does
 
-**On startup:** if a newer version is available, shows a prompt:
-- **Update now** — install with npm, then auto-restart pi on the current session
-- **Skip** — dismiss until next session
-- **Skip this version** — don't ask again until a newer version appears
+**On startup:**
+1. Reads `~/.pi/agent/settings.json` to find every `npm:`-installed extension, plus the core `@mariozechner/pi-coding-agent`.
+2. Runs a single batched `npm outdated -g --json` against that set.
+3. If anything is outdated:
+   - **Auto-update mode (default):** runs one batched `npm install -g pkg@latest …`, then auto-restarts pi on the current session.
+   - **Prompt mode** (`PI_AUTO_UPDATE=0`): shows the legacy interactive selector — `Update all` / `Skip` / `Skip these versions`.
 
-After a successful update, pi-updater asks whether to restart immediately. If confirmed, pi relaunches seamlessly on the current session. In non-interactive modes or if auto-restart fails, it falls back to a manual restart message.
-
-**In the background (once per run):** performs one live npm check and can show the prompt in the same session when a new release is detected.
-
-**`/update`:** manually check for updates (always fetches fresh from npm, unless `PI_OFFLINE` is set).
+**`/update`:** manually check for updates. Always shows the interactive selector regardless of `PI_AUTO_UPDATE`, so you can inspect what's available on demand.
 
 ## How version checks work
 
-pi-updater uses a cache-first approach to keep startup fast:
+Cache-first to keep startup snappy:
 
-1. On startup, cached version data is checked instantly.
-2. One background live fetch refreshes the cache.
-3. If the background fetch finds a newer version, pi-updater can prompt in the same session.
-4. Automatic checks are skipped when `PI_SKIP_VERSION_CHECK` or `PI_OFFLINE` is set.
+1. On startup, cached outdated data is acted on instantly (auto-install or prompt).
+2. One background live check refreshes the cache.
+3. If the live check finds new updates and the agent is idle, they're applied in the same session. Otherwise they're saved to cache and applied on next launch.
+4. Auto checks are skipped when `PI_SKIP_VERSION_CHECK` or `PI_OFFLINE` is set.
 
 ## Install
 
@@ -40,32 +36,25 @@ pi install npm:pi-updater
 Or from git:
 
 ```bash
-pi install git:github.com/tonze/pi-updater
+pi install git:github.com/ryanrhughes/pi-updater
 ```
 
 ## Usage
 
-Use `/update` inside pi to manually check for updates and install them.
+- Auto-update happens automatically at startup. No action needed.
+- Use `/update` inside pi to manually inspect/install updates with a confirmation prompt.
 
 ## Environment flags
 
-Disable automatic version checks:
-
-```bash
-export PI_SKIP_VERSION_CHECK=1
-```
-
-Or run in offline mode (also disables automatic checks):
-
-```bash
-export PI_OFFLINE=1
-```
+| Variable | Effect |
+|---|---|
+| `PI_AUTO_UPDATE=0` | Disable silent auto-update; show the interactive prompt instead. Also accepts `false`, `off`, `no`. |
+| `PI_SKIP_VERSION_CHECK=1` | Disable automatic checks entirely. Manual `/update` still works. |
+| `PI_OFFLINE=1` | Disable all network checks (and `/update`). |
 
 ## Updating this package
 
-```bash
-pi update
-```
+If `pi-updater` itself has an update, it gets picked up by the same batched check and updated alongside everything else.
 
 ## License
 

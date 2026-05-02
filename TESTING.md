@@ -6,22 +6,44 @@ Uninstall the npm version and install from the local checkout:
 
 ```bash
 pi uninstall npm:pi-updater
-pi install /Users/toms/dev/pi-updater
+pi install ~/Work/pi-updater
 ```
 
 Or load it directly without touching installed packages:
 
 ```bash
-pi -ne -e /Users/toms/dev/pi-updater/index.ts
+pi -ne -e ~/Work/pi-updater/index.ts
 ```
 
-## Test the full UI flow
+## Test the simulated update flow
 
 ```
 /update --test
 ```
 
-Simulates: select → install (fake 1.5s) → confirm restart → restart on same session.
+Simulates a multi-package interactive prompt → install (fake 1.5s) → confirm restart → restart on same session. This always uses the interactive flow regardless of `PI_AUTO_UPDATE`.
+
+## Test silent auto-update
+
+Force a real outdated state:
+
+```bash
+# Downgrade the core pi to make it look outdated.
+npm install -g @mariozechner/pi-coding-agent@0.61.1
+# Reinstall pi-updater since the pi downgrade nukes it.
+pi install ~/Work/pi-updater
+pi
+```
+
+You should see a brief "Updating: …" notification, an install loader, then pi auto-restarts on the latest version.
+
+## Test prompt-mode fallback
+
+```bash
+PI_AUTO_UPDATE=0 pi
+```
+
+When updates exist, you should see the interactive selector instead of a silent update.
 
 ## Screen recording
 
@@ -33,19 +55,9 @@ To hide skills/extensions on startup, set in `~/.pi/agent/settings.json`:
 }
 ```
 
-To simulate a real update with an older pi version:
-
-```bash
-npm install -g @mariozechner/pi-coding-agent@0.61.1
-npm install -g pi-updater@0.3.0
-pi
-```
-
-Both commands, that order. The pi downgrade nukes pi-updater from global node_modules, so the second install is required.
-
 ## Restore npm version
 
 ```bash
-pi uninstall /Users/toms/dev/pi-updater
+pi uninstall ~/Work/pi-updater
 pi install npm:pi-updater
 ```
