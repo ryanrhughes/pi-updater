@@ -105,6 +105,28 @@ function readConfiguredPackages(): string[] {
   return Array.from(set);
 }
 
+interface NpmOutdatedEntry {
+  current?: string;
+  latest?: string;
+  wanted?: string;
+  dependent?: string;
+  location?: string;
+}
+
+function pickTopLevelEntry(
+  name: string,
+  entries: NpmOutdatedEntry[],
+): NpmOutdatedEntry | undefined {
+  // Prefer the top-level global install (npm marks it dependent="lib" or
+  // location ends with `node_modules/<name>` with no extra nesting).
+  const suffix = `/node_modules/${name}`;
+  const topLevel = entries.find(
+    (e) => e.dependent === "lib" || e.location?.endsWith(suffix),
+  );
+  if (topLevel) return topLevel;
+  return entries.find((e) => e.current && e.latest && e.current !== e.latest);
+}
+
 async function fetchOutdated(
   pi: ExtensionAPI,
   pkgs: string[],
@@ -118,12 +140,13 @@ async function fetchOutdated(
     if (!out) return [];
     const obj = JSON.parse(out) as Record<
       string,
-      { current?: string; latest?: string }
+      NpmOutdatedEntry | NpmOutdatedEntry[]
     >;
     const result: OutdatedPackage[] = [];
-    for (const [name, v] of Object.entries(obj)) {
-      if (v.latest && v.current && v.latest !== v.current) {
-        result.push({ name, current: v.current, latest: v.latest });
+    for (const [name, raw] of Object.entries(obj)) {
+      const entry = Array.isArray(raw) ? pickTopLevelEntry(name, raw) : raw;
+      if (entry?.latest && entry.current && entry.latest !== entry.current) {
+        result.push({ name, current: entry.current, latest: entry.latest });
       }
     }
     return result;
