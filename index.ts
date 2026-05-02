@@ -32,10 +32,21 @@ interface VersionCache {
 function readCache(): VersionCache | undefined {
   try {
     const raw = JSON.parse(readFileSync(CACHE_FILE, "utf-8"));
-    if (!Array.isArray(raw.outdated)) return undefined;
+    if (Array.isArray(raw.outdated)) {
+      return {
+        outdated: raw.outdated as OutdatedPackage[],
+        dismissed: (raw.dismissed as Record<string, string>) || {},
+        checkedAt: raw.checkedAt as string | undefined,
+      };
+    }
+    // Migrate old single-package cache (latestVersion / dismissedVersion).
+    const dismissed: Record<string, string> = {};
+    if (typeof raw.dismissedVersion === "string") {
+      dismissed[CORE_PACKAGE] = raw.dismissedVersion;
+    }
     return {
-      outdated: raw.outdated as OutdatedPackage[],
-      dismissed: (raw.dismissed as Record<string, string>) || {},
+      outdated: [],
+      dismissed,
       checkedAt: raw.checkedAt as string | undefined,
     };
   } catch {
@@ -46,7 +57,19 @@ function readCache(): VersionCache | undefined {
 function writeCache(cache: VersionCache) {
   try {
     mkdirSync(dirname(CACHE_FILE), { recursive: true });
-    writeFileSync(CACHE_FILE, JSON.stringify(cache) + "\n");
+    // Preserve legacy fields so older pi-updater versions sharing this cache
+    // file can still read it without crashing on parseVersion(undefined).
+    const core = cache.outdated.find((p) => p.name === CORE_PACKAGE);
+    const legacy: { latestVersion: string; dismissedVersion?: string } = {
+      latestVersion: core?.latest ?? VERSION,
+    };
+    if (cache.dismissed[CORE_PACKAGE]) {
+      legacy.dismissedVersion = cache.dismissed[CORE_PACKAGE];
+    }
+    writeFileSync(
+      CACHE_FILE,
+      JSON.stringify({ ...legacy, ...cache }) + "\n",
+    );
   } catch {}
 }
 
